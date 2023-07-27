@@ -44,18 +44,20 @@ class GcsReader(AbstractReader):
         else:
             # Split the glob and the prefix
             self.prefix = path[:lowest_pos]
-            self.glob = path[lowest_pos:]
+            self.glob = path
 
     def __iter__(self) -> Iterator[Record]:
         blobs = self.gcs.list_blobs(bucket_or_name=self.bucket, prefix=self.prefix)
         for blob in blobs:
-            if blob.size == 0:
+            if blob.size == 0:  # Skip empty files
                 continue
             if self.glob and not fnmatch(blob.name, self.glob):
                 continue
             blobreader = gcs_io.BlobReader(blob)
 
-            reader = RecordAdapter(blobreader, out=False)
+            # Give the file-like object to RecordAdapter so it will select the right adapter by peeking into the
+            # bytestream
+            reader = RecordAdapter(fileobj=blobreader, out=False, selector=self.selector)
             for record in reader:
                 yield record
 
