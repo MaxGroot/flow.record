@@ -1,4 +1,5 @@
 import datetime
+import platform
 import sys
 
 import pytest
@@ -28,25 +29,7 @@ from flow.record.base import (
 )
 from flow.record.selector import CompiledSelector, Selector
 
-
-def generate_records(count=100):
-    TestRecordEmbedded = RecordDescriptor(
-        "test/embedded_record",
-        [
-            ("datetime", "dt"),
-        ],
-    )
-    TestRecord = RecordDescriptor(
-        "test/adapter",
-        [
-            ("uint32", "number"),
-            ("record", "record"),
-        ],
-    )
-
-    for i in range(count):
-        embedded = TestRecordEmbedded(datetime.datetime.utcnow())
-        yield TestRecord(number=i, record=embedded)
+from ._utils import generate_records
 
 
 def test_stream_writer_reader():
@@ -71,7 +54,7 @@ def test_recordstream_filelike_object():
         out.write(rec)
 
     fp.seek(0)
-    reader = RecordReader(fp, selector="r.number in (6, 9)")
+    reader = RecordReader(fileobj=fp, selector="r.number in (6, 9)")
 
     #  The record reader should automatically have created a 'StreamReader' to handle the Record Stream.
     assert isinstance(reader, StreamReader)
@@ -106,6 +89,11 @@ def test_compressed_writer_reader(tmpdir, compression):
     if compression == "zstd" and not HAS_ZSTD:
         pytest.skip("zstandard module not installed")
 
+    if compression == "lz4" and platform.python_implementation() == "PyPy":
+        pytest.skip("lz4 module not supported on PyPy")
+    if compression == "zstd" and platform.python_implementation() == "PyPy":
+        pytest.skip("zstandard module not supported on PyPy")
+
     p = tmpdir.mkdir("{}-test".format(compression))
     path = str(p.join("test.records.{}".format(compression)))
 
@@ -136,6 +124,15 @@ def test_compressed_writer_reader(tmpdir, compression):
         numbers.append(rec.number)
 
     assert numbers == list(range(count))
+
+    # Using a file-handle instead of a path should also work
+    with open(path, "rb") as fh:
+        reader = RecordReader(fileobj=fh)
+        numbers = []
+        for rec in reader:
+            numbers.append(rec.number)
+
+        assert numbers == list(range(count))
 
 
 def test_path_template_writer(tmpdir):

@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
+from typing import Any, Dict, Iterator
 
 import fastavro
 
@@ -58,7 +59,7 @@ class AvroWriter(AbstractWriter):
         self.writer = None
         self.codec = "snappy" if find_spec("snappy") else "deflate"
 
-    def write(self, r):
+    def write(self, r: record.Record) -> None:
         if not self.desc:
             self.desc = r._desc
             self.schema = descriptor_to_schema(self.desc)
@@ -71,10 +72,15 @@ class AvroWriter(AbstractWriter):
         self.writer.write(r._packdict())
 
     def flush(self):
-        if self.writer:
-            self.writer.flush()
+        if not self.writer:
+            self.writer = fastavro.write.Writer(
+                self.fp,
+                fastavro.parse_schema({"type": "record", "name": "empty"}),
+                codec=self.codec,
+            )
+        self.writer.flush()
 
-    def close(self):
+    def close(self) -> None:
         if self.fp and not is_stdout(self.fp):
             self.fp.close()
         self.fp = None
@@ -89,7 +95,7 @@ class AvroReader(AbstractReader):
         self.selector = make_selector(selector)
 
         self.reader = fastavro.reader(self.fp)
-        self.schema = self.reader.schema
+        self.schema = self.reader.writer_schema
         if not self.schema:
             raise Exception("Missing Avro schema")
 
@@ -100,7 +106,7 @@ class AvroReader(AbstractReader):
             name for name, field in self.desc.get_all_fields().items() if field.typename == "datetime"
         )
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[record.Record]:
         for obj in self.reader:
             # Convert timestamp-micros fields back to datetime fields
             for field_name in self.datetime_fields:
@@ -112,13 +118,13 @@ class AvroReader(AbstractReader):
             if not self.selector or self.selector.match(rec):
                 yield rec
 
-    def close(self):
+    def close(self) -> None:
         if self.fp:
             self.fp.close()
         self.fp = None
 
 
-def descriptor_to_schema(desc):
+def descriptor_to_schema(desc: record.RecordDescriptor) -> Dict[str, Any]:
     namespace, _, name = desc.name.rpartition("/")
     schema = {
         "type": "record",
@@ -151,7 +157,7 @@ def descriptor_to_schema(desc):
     return schema
 
 
-def schema_to_descriptor(schema):
+def schema_to_descriptor(schema: dict) -> record.RecordDescriptor:
     doc = schema.get("doc")
 
     # Sketchy record descriptor detection
@@ -173,7 +179,7 @@ def schema_to_descriptor(schema):
     return record.RecordDescriptor(name, fields)
 
 
-def avro_type_to_flow_type(ftype):
+def avro_type_to_flow_type(ftype: list) -> str:
     ftypes = [ftype] if not isinstance(ftype, list) else ftype
 
     # If a field can be null, it has an additional type of "null"
@@ -185,7 +191,7 @@ def avro_type_to_flow_type(ftype):
                 return "{}[]".format(item_type)
             else:
                 logical_type = t.get("logicalType")
-                if logical_type and "time" in logical_type or "date" in logical_type:
+                if logical_type and ("time" in logical_type or "date" in logical_type):
                     return "datetime"
 
         if t == "null":
