@@ -689,6 +689,8 @@ def DynamicDescriptor(name, fields):
 
 
 def open_stream(fp: BinaryIO, mode: str) -> BinaryIO:
+    if "w" in mode:
+        return fp
     if not hasattr(fp, "peek"):
         fp = Peekable(fp)
 
@@ -732,7 +734,7 @@ def open_file(path: Any, mode: str, clobber: bool = True) -> IO:
     elif isinstance(path, Peekable):
         return path
     elif isinstance(path, io.IOBase):
-        return open_stream(path, "rb")
+        return open_stream(path, mode)
     else:
         raise ValueError(f"Unsupported path type {path}")
 
@@ -821,9 +823,8 @@ def RecordAdapter(
     cls_stream = None
     cls_url = None
     adapter = None
-
     # When a url is given, we interpret it to determine what kind of adapter we need. This piece of logic is always
-    # necessary for the RecordWriter (as it does not currently support file-like objects), and only needed for
+    # necessary for the RecordWriter (as it needs to determine the right Writer based on the url), and only needed for
     # RecordReader if a url is provided.
     if out is True or url not in ("-", "", None):
         # Either stdout / stdin is given, or a path-like string.
@@ -842,37 +843,38 @@ def RecordAdapter(
         cls_url = p.netloc + p.path
         if sub_adapter:
             cls_url = sub_adapter + "://" + cls_url
-    elif url in ("-", ""):
-        # For reading stdin, we cannot rely on an extension to know what sort of stream is incoming. Thus, we will treat
-        # it as a 'fileobj', where we can peek into the stream and try to select the appropriate adapter.
-        fileobj = getattr(sys.stdin, "buffer", sys.stdin)
-    if fileobj is not None:
-        # This record adapter has received a file-like object for record reading
-        # We just need to find the right adapter by peeking into the first few bytes.
+    if out is False:
+        if url in ("-", ""):
+            # For reading stdin, we cannot rely on an extension to know what sort of stream is incoming. Thus, we will
+            # treat it as a 'fileobj', where we can peek into the stream and try to select the appropriate adapter.
+            fileobj = getattr(sys.stdin, "buffer", sys.stdin)
+        if fileobj is not None:
+            # This record adapter has received a file-like object for record reading We just need to find the right
+            # adapter by peeking into the first few bytes. First, we open the stream. If the stream is compressed,
+            # open_stream will wrap it for us into a
+            # decompressor.
+            cls_stream = open_stream(fileobj, "rb")
 
-        # First, we open the stream. If the stream is compressed, open_stream will wrap it for us into a decompressor.
-        cls_stream = open_stream(fileobj, "rb")
+            # Now, we have a stream that will be transparently decompressed but we still do not know what adapter to
+            # use. This requires a new peek into the transparent stream. This peek will cause the stream pointer to be
+            # moved. Therefore, find_adapter_for_stream returns both a BinaryIO-supportive object that can correctly
+            # read the adjusted stream, and a string indicating the type of adapter to be used on said stream.
+            arg_dict = kwargs.copy()
 
-        # Now, we have a stream that will be transparently decompressed but we still do not know what adapter to use.
-        # This requires a new peek into the transparent stream. This peek will cause the stream pointer to be moved.
-        # Therefore, find_adapter_for_stream returns both a BinaryIO-supportive object that can correctly read the
-        # adjusted stream, and a string indicating the type of adapter to be used on said stream.
-        arg_dict = kwargs.copy()
-
-        # If a user did not provide a url, we have to peek into the stream to be able to determine the right adapter
-        # based on magic bytes encountered in the first few bytes of the stream.
-        if adapter is None:
-            cls_stream, adapter = find_adapter_for_stream(cls_stream)
+            # If a user did not provide a url, we have to peek into the stream to be able to determine the right adapter
+            # based on magic bytes encountered in the first few bytes of the stream.
             if adapter is None:
-                if hasattr(cls_stream, "buffer") and cls_stream.buffer.getvalue().startswith(b"<"):
-                    raise RecordAdapterNotFound(
-                        (
-                            "Could not find a reader for this input. Are you perhaps entering record text,"
-                            " rather than a recordstream? This can be fixed by using 'rdump -w -' to write a"
-                            " recordstream to stdout."
+                cls_stream, adapter = find_adapter_for_stream(cls_stream)
+                if adapter is None:
+                    if hasattr(cls_stream, "buffer") and cls_stream.buffer.getvalue().startswith(b"<"):
+                        raise RecordAdapterNotFound(
+                            (
+                                "Could not find a reader for this input. Are you perhaps entering record text,"
+                                " rather than a recordstream? This can be fixed by using 'rdump -w -' to write a"
+                                " recordstream to stdout."
+                            )
                         )
-                    )
-                raise RecordAdapterNotFound("Could not find adapter for file-like object")
+                    raise RecordAdapterNotFound("Could not find adapter for file-like object")
 
     # Now that we know which adapter is needed, we import it.
     mod = importlib.import_module("flow.record.adapter.{}".format(adapter))
@@ -886,8 +888,10 @@ def RecordAdapter(
         arg_dict["clobber"] = clobber
     log.debug("Creating {!r} for {!r} with args {!r}".format(cls, url, arg_dict))
 
-    if fileobj is not None:
+    if cls_stream is not None:
         return cls(cls_stream, **arg_dict)
+    if fileobj is not None:
+        return cls(fileobj, **arg_dict)
     return cls(cls_url, **arg_dict)
 
 
